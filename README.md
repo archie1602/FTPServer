@@ -1,5 +1,5 @@
 # FTP Server
-This is a simple implementation of FTP server in C# + NET 5.0 for Linux Ubuntu 20.04 as a class project for operating systems at [Russian Technological University (MIREA)](https://www.mirea.ru/).
+This is a simple implementation of FTP server in C# + NET 5.0 for Linux Ubuntu 20.04 as a class project for operating systems at [Russian Technological University (MIREA)](https://www.mirea.ru/) in fall semester 2020.
 
 
 ## The main features of this implementation
@@ -19,7 +19,7 @@ This is a simple implementation of FTP server in C# + NET 5.0 for Linux Ubuntu 2
 - Supports the minimum required ftp commands.
 
 ## General architecture
-This implementation consists of three classes: ```Server```, ```Client```, and ```ConnectedSocket```. The server class contains the main ```Execute()``` method. This method uses the static method ``` Socket.Select()```, which sleeps indefinitely until one of the sockets performs an action.
+This implementation consists of three classes: ```Server```, ```Client```, and ```ConnectedSocket```. The ```Server``` class contains the main ```Execute()``` method. This method uses the static method ``` Socket.Select()```, which sleeps indefinitely until one of the sockets performs an action.
 The ```ConnectedSocket``` class is a wrapper over class ```System.Net.Sockets.Socket``` (```ConnectedSocket``` class inherits from the ```System.Net.Sockets.Socket``` class) and adds additional information necessary for working with the client.
 The ```Client``` class contains all the FTP connection state for a specific client.
 
