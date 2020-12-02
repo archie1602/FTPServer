@@ -682,7 +682,7 @@ namespace ftpserver
                             while (true)
                             {
                                 // Если метод Poll вернул true
-                                if (cltDataConnSock.Poll(1, SelectMode.SelectRead))
+                                if (cltDataConnSock.Poll(0, SelectMode.SelectRead))
                                 {
                                     // Тогда: возможны две причины по которым это произошло
                                     // 1. Поступление байтов в буфер сокета => .Available > 0
@@ -820,7 +820,7 @@ namespace ftpserver
                 }
 
                 // Тайм аут в микросекундах, который метод Poll будет ожидать
-                int timeout = 1; // 0,000001 секунда = 1 микросекунда
+                int timeout = 0; // 0 микросекунд
 
                 // Если метод Poll вернул true и нет доступных команд для чтения
                 if (cltCtrlConnSock.Poll(timeout, SelectMode.SelectRead) && (cltCtrlConnSock.Available == 0))

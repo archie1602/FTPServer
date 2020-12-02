@@ -36,7 +36,7 @@ namespace ftpserver
         void AcceptClients(ConnectedSocket listener)
         {
             // Тайм аут в микросекундах, который метод Poll будет ожидать
-            int timeout = 1; // 0,000001 секунда = 1 микросекунда
+            int timeout = 0; // 0 микросекунд
 
             // Принимаем всех клиентов, ожидающих подключения
             while (listener.Poll(timeout, SelectMode.SelectRead))
@@ -129,27 +129,10 @@ namespace ftpserver
                 // 1. Данный клиент отправил команду серверу и на момент вызова метода Select() был подключён к серверу
                 // 2. Данный клиент отправил команду серверу и на момент вызова метода Select() уже был отключён от сервера
 
-                // Если управляющее соединение данного клиента не находится в заблокированном состоянии
-                if (!currentClient.IsCtrlConnBlocked)
-                {
-                    // Тогда:
-
-                    // Вызываем метод для обработки команд
-                    // Если метод вернёт false
-                    if (!currentClient.HandleCmds(connectedSockets)) // Тогда: это означает, что клиент отключился от сервера => удалим его из списка клиентов
-                        RemoveClient(ConnectedClientSock); // Удаляем данного клиента из списка всех подключённых клиентов connectedSockets
-                }
-                else
-                {
-                    // Считываем команды, которые прислал клиент и игнорируем их, так как
-                    // управляющее соединение данного клиента находится в заблокированном состоянии
-                    // а считывать команды необходимо для того, чтобы Select уснул на некоторое время
-
-                    byte[] buffer = new byte[1024];
-
-                    while (ConnectedClientSock.Available > 0)
-                        ConnectedClientSock.Receive(buffer);
-                }
+                // Вызываем метод для обработки команд
+                // Если метод вернёт false
+                if (!currentClient.HandleCmds(connectedSockets)) // Тогда: это означает, что клиент отключился от сервера => удалим его из списка клиентов
+                    RemoveClient(ConnectedClientSock); // Удаляем данного клиента из списка всех подключённых клиентов connectedSockets
             }
         }
 
@@ -190,7 +173,7 @@ namespace ftpserver
         // Метод, который проверяет является ли сокет клиента подключенным к серверу
         public bool isClientConnected(Socket client)
         {
-            bool flag1 = client.Poll(1, SelectMode.SelectRead);
+            bool flag1 = client.Poll(0, SelectMode.SelectRead);
 
             bool flag2 = (client.Available == 0);
 
@@ -242,7 +225,7 @@ namespace ftpserver
                     {
                         if (sock.IsCltDataConnSock && sock.Client.RecentUnhandledCmd == Client.Cmd.RETR)
                             writableSockets.Add(sock);
-                        else
+                        else if (sock.Client == null || !sock.IsCltControlConnectionSock || !sock.Client.IsCtrlConnBlocked)
                             readableSockets.Add(sock);
                     }
 
