@@ -476,29 +476,19 @@ namespace ftpserver
                         // Общее количество отправленных байт
                         int totalBytesSent = isContinue ? (int)unhandledCmd.Value.Item3.Value : 0;
 
-                        // Количество отправленных байт (за одну итерацию цикла)
-                        int currentBytesSend = 0;
-
-                        // Количество байт, необходимых для отправки
-                        int requiredBytesSend = 0;
-
                         byte[] buffer = Encoding.ASCII.GetBytes(listing);
 
-                        // Отправляем отклик сервера клиенту
-                        while (totalBytesSent < buffer.Length && currentBytesSend == requiredBytesSend)
-                        {
-                            requiredBytesSend = buffer.Length - totalBytesSent;
-                            currentBytesSend = cltDataConnSock.Send(buffer, totalBytesSent, requiredBytesSend, SocketFlags.None);
-                            totalBytesSent += currentBytesSend;
-                        }
+                        // Отправляем листинг клиенту
+                        totalBytesSent += cltDataConnSock.Send(buffer, totalBytesSent, buffer.Length - totalBytesSent, SocketFlags.None);
 
-                        // Если отправка листинг еще не закончен
+                        // Если отправилось меньше байт, чем требуется
                         if (totalBytesSent < buffer.Length)
                         {
                             // Тогда: => буфер сокета переполнен и необходимо продолжить отправку позже
 
                             unhandledCmd = (cmd, listing, totalBytesSent);
 
+                            // Если это первая попытка отправить листинг
                             if (!isContinue)
                             {
                                 // Тогда:
@@ -549,6 +539,8 @@ namespace ftpserver
                     // Если путь указан некорректно
                     if (!isContinue && !tuple.Value.Item1)
                     {
+                        isCtrlConnBlocked = false;
+
                         // Тогда: отправляем клиенту отклик код 550 с сообщением об ошибке
                         if (!SendResponse(Cmd.RETR, "550 Failed to open file.") && unhandledRes == null) return false;
                     }
@@ -573,17 +565,8 @@ namespace ftpserver
                         // Вспомогательная переменная для количества считанных байт
                         int bytesRead = 0;
 
-                        // Вспомогательная переменная для количества отправленных байт
-                        //int bytesSend = 0;
-
-                        // Общее количество отправленных байт (за одну итерацию внешнего цикла)
-                        int totalBytesSent = 0;
-
                         // Количество отправленных байт (за одну итерацию внутреннего цикла)
                         int currentBytesSend = 0;
-
-                        // Количество байт, необходимых для отправки
-                        int requiredBytesSend = 0;
 
                         try
                         {
@@ -605,27 +588,27 @@ namespace ftpserver
                             {
                                 // Считываем байты файла
                                 bytesRead = fstream.Read(buffer, 0, buffer.Length);
-                                currentBytesSend = totalBytesSent = requiredBytesSend = 0;
 
-                                // Отправляем считанные из файла байты - клиенту
-                                while ((totalBytesSent < bytesRead) && (currentBytesSend == requiredBytesSend))
-                                {
-                                    requiredBytesSend = bytesRead - totalBytesSent;
-                                    currentBytesSend = cltDataConnSock.Send(buffer, totalBytesSent, requiredBytesSend, SocketFlags.None);
-                                    totalBytesSent += currentBytesSend;
-                                }
+                                // Отправляем считанные байты файла клиенту
+                                if (bytesRead > 0)
+                                    currentBytesSend = cltDataConnSock.Send(buffer, 0, bytesRead, SocketFlags.None);
+                                else
+                                    currentBytesSend = 0;
 
-                            } while ((bytesRead > 0) && (currentBytesSend == requiredBytesSend));
+                            } while ((bytesRead > 0) && (currentBytesSend == bytesRead));
+                            // Цикл while работает до тех пора, пока:
+                            // 1. файл полностью не будет отправлен
+                            // 2. за последнюю итерацию цикла отправили столько байт, сколько и считали из файла
 
-                            // Если отправка файла еще не закончилась
-                            if (currentBytesSend < requiredBytesSend)
+                            // Если отправили меньше байт, чем считали из файла
+                            if (currentBytesSend < bytesRead)
                             {
                                 // Тогда:
                                 // => буфер сокета переполнен и необходимо продолжить отправку позже
                                 // => необходимо подождать, пока клиент считает ранее отправленные байты
 
                                 // Сохраняем в поле unhandledCmd необработанную команду, её аргумент (уже упрощённый путь к существующему файлу), а также позицию указателя, с которой необходимо будет продолжить передачу файла
-                                unhandledCmd = (cmd, absPath, fstream.Position - (bytesRead - totalBytesSent));
+                                unhandledCmd = (cmd, absPath, fstream.Position - (bytesRead - currentBytesSend));
 
                                 // Если переполнение буфера при передаче данного файла случилось первый раз
                                 if (!isContinue)
@@ -813,23 +796,12 @@ namespace ftpserver
             // Общее количество отправленных байт
             int totalBytesSent = (unhandledRes == null) ? 0 : unhandledRes.Value.Item3;
 
-            // Количество отправленных байт (за одну итерацию цикла)
-            int currentBytesSend = 0;
-
-            // Количество байт, необходимых для отправки
-            int requiredBytesSend = 0;
-
             try
             {
                 // Отправляем отклик сервера клиенту
-                while ((totalBytesSent < buffer.Length) && (currentBytesSend == requiredBytesSend))
-                {
-                    requiredBytesSend = buffer.Length - totalBytesSent;
-                    currentBytesSend = cltCtrlConnSock.Send(buffer, totalBytesSent, requiredBytesSend, SocketFlags.None);
-                    totalBytesSent += currentBytesSend;
-                }
+                totalBytesSent += cltCtrlConnSock.Send(buffer, totalBytesSent, buffer.Length - totalBytesSent, SocketFlags.None);
 
-                // Если отправка отклика еще не закончилась
+                // Если отправилось меньше байт, чем требуется
                 if (totalBytesSent < buffer.Length)
                 {
                     // Тогда: => буфер сокета переполнен и необходимо продолжить отправку позже
