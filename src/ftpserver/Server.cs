@@ -71,8 +71,6 @@ namespace ftpserver
         // Метод, который удаляет клиента client из списка connectedSockets
         void RemoveClient(ConnectedSocket ConnectedClientSock)
         {
-            // TODO: удалить все сокеты, содержащие данного клиента в качестве поля
-
             // Получаем объект клиента, который соответствует данному клиентскому сокету ConnectedClientSock
             Client currentClient = ConnectedClientSock.Client;
 
@@ -152,8 +150,13 @@ namespace ftpserver
 
 
                 // Если клиент подключился к управлящему соединению после того, как запросил команду, требующую данное соединение
-                if (currentClient.UnhandledCmd != null) // Тогда: необходимо вручную вызвать данную необработанную команду
-                    currentClient.HandleDataConnection(currentClient.UnhandledCmd.Value.Item1, currentClient.UnhandledCmd.Value.Item2, connectedSockets); // => клиент подключился к соединению для передачи данных после вызова команды
+                if (currentClient.UnhandledCmd != null)
+                {
+                    // Тогда: необходимо вручную вызвать данную необработанную команду
+                    // => клиент подключился к соединению для передачи данных после вызова команды
+
+                    if (!currentClient.HandleDataConnection(currentClient.UnhandledCmd.Value.Item1, currentClient.UnhandledCmd.Value.Item2, connectedSockets)) RemoveClient(sock);
+                }
                 else // Иначе, если команда, требующая соединения для передачи данных ещё не была вызвана => клиент подключился к соединению для передачи данных раньше времени
                     connectedSockets.Remove(sock); // Тогда: можно удалить данный listener-сокет из списка, так как клиент уже подключился, а подключать других клиентов - не нужно
 
@@ -165,8 +168,45 @@ namespace ftpserver
                 // Получаем необработанную команду клиента
                 (Client.Cmd, string, long?) unhandledCmd = currentClient.UnhandledCmd.Value;
 
-                // Вручную вызываем метод HandleDataConnection с командой RETR / STOR
-                currentClient.HandleDataConnection(unhandledCmd.Item1, unhandledCmd.Item2, connectedSockets);
+                // Вручную вызываем метод HandleDataConnection с командой RETR / STOR / LIST
+                if (!currentClient.HandleDataConnection(unhandledCmd.Item1, unhandledCmd.Item2, connectedSockets)) RemoveClient(sock);
+            }
+        }
+
+        // Метод, который обрабатывает ранее неотправленные полностью отклики сервера
+        void HandleServerResponse(ConnectedSocket sock)
+        {
+            (Client.Cmd?, byte[], int, bool, string?)? unhandledResp = sock.Client.RecentUnhandledResponse;
+            Client client = sock.Client;
+
+            if (unhandledResp.Value.Item4)
+            {
+                if (unhandledResp.Value.Item1 == Client.Cmd.QUIT)
+                {
+                    client.SendResponse(Client.Cmd.QUIT, null, true);
+
+                    if (client.RecentUnhandledResponse == null) RemoveClient(sock);
+                }
+                else // Иначе, если необходимо обработать команды: RETR, STOR, LIST
+                {
+                    // Если необходимо обработать отклики 226 и 550 (true)
+                    if (unhandledResp.Value.Item5 == null)
+                    {
+                        if (!client.SendResponse(unhandledResp.Value.Item1, null, true) && client.RecentUnhandledResponse == null)
+                            RemoveClient(sock);
+                        else if (client.RecentUnhandledResponse == null) // Иначе, если client.SendResponse(Client.Cmd.STOR или Client.Cmd.RETR или Client.Cmd.LIST, null, true) вернул true
+                        {
+                            // Закрываем соединение для передачи данных
+                            client.CloseDataConnection(connectedSockets);
+                        }
+                    }
+                    else // => необходимо обработать отклик 150
+                        if (!client.HandleDataConnection(unhandledResp.Value.Item1.Value, unhandledResp.Value.Item5, connectedSockets)) RemoveClient(sock);
+                }
+            }
+            else
+            {
+                if (!client.SendResponse(unhandledResp.Value.Item1, null) && client.RecentUnhandledResponse == null) RemoveClient(sock);
             }
         }
 
@@ -219,11 +259,11 @@ namespace ftpserver
 
                     // Добавляем в список readableSockets сокет listener
                     readableSockets.Add(listener);
-
+                    
                     // Копируем из списка connectedSockets в списки readableSockets и writableSockets полученные ранее сокеты
                     foreach (ConnectedSocket sock in connectedSockets)
                     {
-                        if (sock.IsCltDataConnSock && sock.Client.RecentUnhandledCmd == Client.Cmd.RETR)
+                        if ((sock.IsCltDataConnSock && sock.Client.RecentUnhandledCmd == Client.Cmd.RETR) || (sock.IsCltControlConnectionSock && sock.Client.RecentUnhandledResponse != null))
                             writableSockets.Add(sock);
                         else if (sock.Client == null || !sock.IsCltControlConnectionSock || !sock.Client.IsCtrlConnBlocked)
                             readableSockets.Add(sock);
@@ -275,6 +315,13 @@ namespace ftpserver
 
                             // Обрабатываем данный сокет
                             HandleDataConnectionCmds(sock);
+                        }
+                        else // Иначе, если данный сокет является client control connection сокетом
+                        {
+                            // Тогда:
+
+                            // Обрабатываем данный сокет
+                            HandleServerResponse(sock);
                         }
                     }
                 }

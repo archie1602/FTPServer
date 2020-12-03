@@ -26,8 +26,12 @@ namespace ftpserver
         // Recent unhandled command
         (Cmd, string, long?)? unhandledCmd;
 
+        // Recent unhandled response
+        (Cmd?, byte[], int, bool, string)? unhandledRes;
+
         // Id клиента
         static long id = 0;
+        long idCurrent = 0;
 
         FileStream fstream;
         string currDir;
@@ -50,8 +54,9 @@ namespace ftpserver
             workingDirPath = _workingDirPath;
             serverIP = _serverIP;
             unhandledCmd = null;
+            unhandledRes = null;
             fstream = null;
-            id++;
+            idCurrent = id++;
         }
 
         // Get и Set свойства
@@ -84,6 +89,11 @@ namespace ftpserver
             get { return (unhandledCmd == null) ? null : unhandledCmd.Value.Item1; }
         }
 
+        public (Cmd?, byte[], int, bool, string)? RecentUnhandledResponse
+        {
+            get { return unhandledRes; }
+        }
+
         public string CurrDir
         {
             get { return currDir; }
@@ -104,29 +114,14 @@ namespace ftpserver
 
         public long GetId
         {
-            get { return id; }
-        }
-
-        // Метод, который отправляет клиенту код 230 и сообщает о том, что клиент успешно авторизован
-        void SuccesAuth()
-        {
-            if (cltCtrlConnSock != null)
-                SendResponse("230 Login successful.");
-        }
-
-        // Метод, который отправляет клиенту код 530 и требует его авторизоваться
-        void RequireAuth()
-        {
-            if (cltCtrlConnSock != null)
-                SendResponse("530 Please login with USER and PASS.");
+            get { return idCurrent; }
         }
 
         // Метод, который отправляет клиенту отклик с кодом 425 и требованием открыть соединение для передачи данных
         // прежде чем вызывать соответствующую команду, требуюущую данное соединение
-        void RequireOpenDataConnection()
+        bool RequireOpenDataConnection(Cmd? cmd)
         {
-            if (cltCtrlConnSock != null)
-                SendResponse("425 Use PORT or PASV first.");
+            return SendResponse(cmd, "425 Use PORT or PASV first.");
         }
 
         // Метод, который вычисляет новый путь директории от домашнеей директории '/'
@@ -244,7 +239,17 @@ namespace ftpserver
             // Скачивание файла с сервера
             RETR,
             // Загрузка файла на сервер
-            STOR
+            STOR,
+            USER,
+            PASS,
+            SYST,
+            PWD,
+            CWD,
+            MKD,
+            DELE,
+            PASV,
+            TYPE,
+            QUIT
         }
 
         // Метод, который проверяет корректность заданного пути: path
@@ -329,7 +334,7 @@ namespace ftpserver
         }
 
         // Метод, который закрывает соединение для передачи данных
-        void CloseDataConnection(List<ConnectedSocket> connectedSockets)
+        public void CloseDataConnection(List<ConnectedSocket> connectedSockets)
         {
             // Удаляем из списка connectedSockets сокет cltDataConnSock
             RemoveSockFromList(connectedSockets, cltDataConnSock);
@@ -363,7 +368,7 @@ namespace ftpserver
         }
 
         // Метод, который обрабатывает команды соединения передачи данных
-        public void HandleDataConnection(Cmd cmd, string arg, List<ConnectedSocket> connectedSockets)
+        public bool HandleDataConnection(Cmd cmd, string arg, List<ConnectedSocket> connectedSockets)
         {
             // Если клиент не подключился к соединению для передачи данных
             if (cltDataConnSock == null)
@@ -388,118 +393,139 @@ namespace ftpserver
                 {
                     // Тогда: необходимо определить листинг файла или листинг директории нужно выполнить
 
-                    // Получаем абсолютный путь к директории или файлу
-                    string absPath = workingDirPath + ((arg == null || arg == ".") ? currDir : SimplifyPath(arg, currDir));
+                    bool isContinue = (unhandledCmd != null) && (unhandledCmd.Value.Item3 != null);
 
-                    // Создаём объект UnixFileInfo на основе пути absPath
-                    UnixFileInfo currentFileOrDir = new UnixFileInfo(absPath);
-
-                    // Переменная flag
-                    bool isExist = currentFileOrDir.Exists;
+                    bool isExist = true;
 
                     // Строка для листинга
                     string listing = string.Empty;
 
-                    // Если указанный файл или директория существует
-                    if (isExist)
+                    // Если это первая попытка данного листинга
+                    if (!isContinue)
                     {
-                        // Тогда: осуществляем листинг
+                        // Удаляем из списка connectedSockets listener-сокет lstrDataConnSock
+                        connectedSockets.Remove(lstrDataConnSock);
+
+                        // Получаем абсолютный путь к директории или файлу
+                        string absPath = workingDirPath + ((arg == null || arg == ".") ? currDir : SimplifyPath(arg, currDir));
+
+                        // Создаём объект UnixFileInfo на основе пути absPath
+                        UnixFileInfo currentFileOrDir = new UnixFileInfo(absPath);
+
+                        // Переменная flag
+                        isExist = currentFileOrDir.Exists;
+
+                        // Если указанный файл или директория существует
+                        if (isExist)
+                        {
+                            // Тогда: осуществляем листинг
+
+                            // Если необходимо выполнить листинг директории
+                            if (currentFileOrDir.FileType == FileTypes.Directory)
+                            {
+                                // Получаем массив строк всех директорий в указанной директории
+                                string[] dirsPaths = Directory.GetDirectories(absPath);
+
+                                // Получаем массив строк всех файлов в указанной директории
+                                string[] filesPaths = Directory.GetFiles(absPath);
+
+                                // Выделяем память под массив строк - все директории и файлы
+                                string[] dirsAndFilesPaths = new string[dirsPaths.Length + filesPaths.Length];
+
+                                // Соединяем два массива в один
+                                dirsPaths.CopyTo(dirsAndFilesPaths, 0);
+                                filesPaths.CopyTo(dirsAndFilesPaths, dirsPaths.Length);
+
+                                // Информацию о текущем файле или директории
+                                UnixFileInfo unixFileInfo;
+
+                                for (int i = 0; i < dirsAndFilesPaths.Length; i++)
+                                {
+                                    // Получаем информацию о текущем файле или директории
+                                    unixFileInfo = new UnixFileInfo(dirsAndFilesPaths[i]);
+
+                                    // Вычисляем дату
+                                    string date = unixFileInfo.LastWriteTime < DateTime.Now - TimeSpan.FromDays(180) ? unixFileInfo.LastWriteTime.ToString("MMM dd  yyyy") : unixFileInfo.LastWriteTime.ToString("MMM dd HH:mm");
+
+                                    // Добавляем очередной файл или директорию в строку ответа клиенту
+                                    listing += string.Format("{0}    {1} {2}     {3}     {4,8} {5} {6}\r\n", getStrPerm((int)unixFileInfo.FileAccessPermissions, unixFileInfo.FileType == FileTypes.Directory), unixFileInfo.LinkCount.ToString(), unixFileInfo.OwnerUserId, unixFileInfo.OwnerGroupId, unixFileInfo.Length, date, unixFileInfo.Name);
+                                }
+                            }
+                            else // Иначе, если необходимо выполнить листинг всего остального
+                            {
+                                // Вычисляем дату
+                                string date = currentFileOrDir.LastWriteTime < DateTime.Now - TimeSpan.FromDays(180) ? currentFileOrDir.LastWriteTime.ToString("MMM dd  yyyy") : currentFileOrDir.LastWriteTime.ToString("MMM dd HH:mm");
+
+                                // Результат листинга
+                                listing = string.Format("{0}    {1} {2}     {3}     {4,8} {5} {6}\r\n", getStrPerm((int)currentFileOrDir.FileAccessPermissions, currentFileOrDir.FileType == FileTypes.Directory), currentFileOrDir.LinkCount.ToString(), currentFileOrDir.OwnerUserId, currentFileOrDir.OwnerGroupId, currentFileOrDir.Length, date, currentFileOrDir.Name);
+                            }
+
+                        }
 
                         // Отправляем код 150 клиенту, который сигнализирует о том, что сейчас будет произведен листинг
-                        SendResponse("150 Here comes the directory listing.");
-
-                        // Если необходимо выполнить листинг директории
-                        if (currentFileOrDir.FileType == FileTypes.Directory)
-                        {
-                            // Получаем массив строк всех директорий в указанной директории
-                            string[] dirsPaths = Directory.GetDirectories(absPath);
-
-                            // Получаем массив строк всех файлов в указанной директории
-                            string[] filesPaths = Directory.GetFiles(absPath);
-
-                            // Выделяем память под массив строк - все директории и файлы
-                            string[] dirsAndFilesPaths = new string[dirsPaths.Length + filesPaths.Length];
-
-                            // Соединяем два массива в один
-                            dirsPaths.CopyTo(dirsAndFilesPaths, 0);
-                            filesPaths.CopyTo(dirsAndFilesPaths, dirsPaths.Length);
-
-                            // Информацию о текущем файле или директории
-                            UnixFileInfo unixFileInfo;
-
-                            for (int i = 0; i < dirsAndFilesPaths.Length; i++)
-                            {
-                                // Получаем информацию о текущем файле или директории
-                                unixFileInfo = new UnixFileInfo(dirsAndFilesPaths[i]);
-
-                                // Вычисляем дату
-                                string date = unixFileInfo.LastWriteTime < DateTime.Now - TimeSpan.FromDays(180) ? unixFileInfo.LastWriteTime.ToString("MMM dd  yyyy") : unixFileInfo.LastWriteTime.ToString("MMM dd HH:mm");
-
-                                // Добавляем очередной файл или директорию в строку ответа клиенту
-                                listing += string.Format("{0}    {1} {2}     {3}     {4,8} {5} {6}\r\n", getStrPerm((int)unixFileInfo.FileAccessPermissions, unixFileInfo.FileType == FileTypes.Directory), unixFileInfo.LinkCount.ToString(), unixFileInfo.OwnerUserId, unixFileInfo.OwnerGroupId, unixFileInfo.Length, date, unixFileInfo.Name);
-                            }
-                        }
-                        else // Иначе, если необходимо выполнить листинг всего остального
-                        {
-                            // Вычисляем дату
-                            string date = currentFileOrDir.LastWriteTime < DateTime.Now - TimeSpan.FromDays(180) ? currentFileOrDir.LastWriteTime.ToString("MMM dd  yyyy") : currentFileOrDir.LastWriteTime.ToString("MMM dd HH:mm");
-
-                            // Результат листинга
-                            listing = string.Format("{0}    {1} {2}     {3}     {4,8} {5} {6}\r\n", getStrPerm((int)currentFileOrDir.FileAccessPermissions, currentFileOrDir.FileType == FileTypes.Directory), currentFileOrDir.LinkCount.ToString(), currentFileOrDir.OwnerUserId, currentFileOrDir.OwnerGroupId, currentFileOrDir.Length, date, currentFileOrDir.Name);
-                        }
-
+                        if (!SendResponse(Cmd.LIST, "150 Here comes the directory listing.", true, arg)) return (unhandledRes == null) ? false : true;
                     }
-
-                    // Удаляем из списка connectedSockets listener-сокет lstrDataConnSock
-                    connectedSockets.Remove(lstrDataConnSock);
+                    else
+                        listing = unhandledCmd.Value.Item2;
 
                     // Если указанный файл или директория существует
                     if (isExist)
                     {
                         // Тогда:
 
+                        // Общее количество отправленных байт
+                        int totalBytesSent = isContinue ? (int)unhandledCmd.Value.Item3.Value : 0;
+
+                        // Количество отправленных байт (за одну итерацию цикла)
+                        int currentBytesSend = 0;
+
+                        // Количество байт, необходимых для отправки
+                        int requiredBytesSend = 0;
+
                         byte[] buffer = Encoding.ASCII.GetBytes(listing);
 
-                        int bytesSend = 0;
-
-                        while (bytesSend < buffer.Length)
+                        // Отправляем отклик сервера клиенту
+                        while (totalBytesSent < buffer.Length && currentBytesSend == requiredBytesSend)
                         {
-                            // Возвращаем результат листинга в соединение для передачи данных
-                            bytesSend += cltDataConnSock.Send(buffer, bytesSend, buffer.Length - bytesSend, SocketFlags.None);
+                            requiredBytesSend = buffer.Length - totalBytesSent;
+                            currentBytesSend = cltDataConnSock.Send(buffer, totalBytesSent, requiredBytesSend, SocketFlags.None);
+                            totalBytesSent += currentBytesSend;
                         }
 
-                        // Отправляем клиенту код 226 - листинг успешно выполнен - в управляющее соединение
-                        SendResponse("226 Directory send OK.");
+                        // Если отправка листинг еще не закончен
+                        if (totalBytesSent < buffer.Length)
+                        {
+                            // Тогда: => буфер сокета переполнен и необходимо продолжить отправку позже
+
+                            unhandledCmd = (cmd, listing, totalBytesSent);
+
+                            if (!isContinue)
+                            {
+                                // Тогда:
+
+                                // Блокируем для данного клиента обработку команд в управляющем соединении
+                                isCtrlConnBlocked = true;
+
+                                // Добавляем сокет cltDataConnSock в список connectedSockets, чтобы
+                                // отслеживать его состояние и когда данный сокет станет доступным для записи
+                                // вернуться и продолжить листинг
+                                connectedSockets.Add(new ConnectedSocket(cltDataConnSock, this, false, false, false, true));
+                            }
+                        }
+                        else
+                        {
+                            // Отправляем клиенту код 226 - листинг успешно выполнен - в управляющее соединение
+                            if (!SendResponse(Cmd.LIST, "226 Directory send OK.", true)) return (unhandledRes == null) ? false : true;
+                        }
                     }
                     else // Иначе, если указанного файла или директории не существует
-                        SendResponse("450 Requested file action not taken."); // Тогда: отправляем клиенту отклик код 450 с сообщением об ошибке: запрошенное действие с файлом не выполнено
+                    {
+                        // Тогда: отправляем клиенту отклик код 450 с сообщением об ошибке: запрошенное действие с файлом не выполнено
+                        if (!SendResponse(Cmd.LIST, "450 Requested file action not taken.") && unhandledRes == null) return false;
+                    }
 
-                    // Запрещаем операции Both - отправки и получения данных на сокете клиента
-                    cltDataConnSock.Shutdown(SocketShutdown.Both);
-
-                    // Закрываем сокет клиента
-                    cltDataConnSock.Close();
-
-                    // Записываем в данный сокет null
-                    cltDataConnSock = null;
-
-                    // Запрещаем операции Both - отправки и получения данных на сокете для прослушивания
-                    lstrDataConnSock.Shutdown(SocketShutdown.Both);
-
-                    // Закрываем сокет для прослушивания
-                    lstrDataConnSock.Close();
-
-                    // Записываем в данный сокет null
-                    lstrDataConnSock = null;
-
-                    // Переводим flag: isPassiveOn в состояние: false
-                    isPassiveOn = false;
-
-                    // Сбрасываем последнюю необработанную команду
-                    unhandledCmd = null;
-
-                    // Осуществляем разблокировку обработки команд в управляющем соединении для данного клиента
-                    isCtrlConnBlocked = false;
+                    // Закрываем соединение для передачи данных
+                    CloseDataConnection(connectedSockets);
 
                 } // Иначе, если необходимо выполнить скачивание файла с сервера
                 else if (cmd == Cmd.RETR)
@@ -522,11 +548,13 @@ namespace ftpserver
 
                     // Если путь указан некорректно
                     if (!isContinue && !tuple.Value.Item1)
-                        SendResponse("550 Failed to open file."); // Тогда: отправляем клиенту отклик код 550 с сообщением об ошибке
+                    {
+                        // Тогда: отправляем клиенту отклик код 550 с сообщением об ошибке
+                        if (!SendResponse(Cmd.RETR, "550 Failed to open file.") && unhandledRes == null) return false;
+                    }
                     else // Иначе
                     {
                         // Тогда:
-
                         // Получаем абсолютный путь к файлу
                         string absPath = isContinue ? unhandledCmd.Value.Item2 : tuple.Value.Item2;
 
@@ -535,17 +563,6 @@ namespace ftpserver
 
                         // Открываем поток для чтения файла
                         fstream = File.OpenRead(absPath);
-
-                        // Если необходимо продолжить отправку данного файла
-                        if (isContinue)
-                        {
-                            // Тогда:
-
-                            // Изменяем позицию указателя в потоке на ту, на которой остановились в предыдущий раз
-                            fstream.Seek(unhandledCmd.Value.Item3.Value, SeekOrigin.Begin);
-                        }
-                        else // Иначе, отправляем клиенту код 150
-                            SendResponse("150 Opening BINARY mode data connection for " + file.Name + " (" + file.Length.ToString() + " bytes).");
 
                         // Размер буфера
                         int bufferSize = 1024 * 1024; // 1 MB
@@ -557,40 +574,60 @@ namespace ftpserver
                         int bytesRead = 0;
 
                         // Вспомогательная переменная для количества отправленных байт
-                        int bytesSend = 0;
+                        //int bytesSend = 0;
+
+                        // Общее количество отправленных байт (за одну итерацию внешнего цикла)
+                        int totalBytesSent = 0;
+
+                        // Количество отправленных байт (за одну итерацию внутреннего цикла)
+                        int currentBytesSend = 0;
+
+                        // Количество байт, необходимых для отправки
+                        int requiredBytesSend = 0;
 
                         try
                         {
+                            // Если необходимо продолжить отправку данного файла
+                            if (isContinue)
+                            {
+                                // Тогда:
+
+                                // Изменяем позицию указателя в потоке на ту, на которой остановились в предыдущий раз
+                                fstream.Seek(unhandledCmd.Value.Item3.Value, SeekOrigin.Begin);
+                            }
+                            else // Иначе, отправляем клиенту код 150
+                            {
+                                if (!SendResponse(Cmd.RETR, "150 Opening BINARY mode data connection for " + file.Name + " (" + file.Length.ToString() + " bytes).", true, arg)) return (unhandledRes == null) ? false : true;
+                            }
+
                             // Считываем файл до тех пор, пока полностью не считаем
                             do
                             {
                                 // Считываем байты файла
                                 bytesRead = fstream.Read(buffer, 0, buffer.Length);
-                                bytesSend = 0;
+                                currentBytesSend = totalBytesSent = requiredBytesSend = 0;
 
                                 // Отправляем считанные из файла байты - клиенту
-                                while (bytesSend < bytesRead)
-                                    bytesSend += cltDataConnSock.Send(buffer, bytesSend, bytesRead - bytesSend, SocketFlags.None);
+                                while ((totalBytesSent < bytesRead) && (currentBytesSend == requiredBytesSend))
+                                {
+                                    requiredBytesSend = bytesRead - totalBytesSent;
+                                    currentBytesSend = cltDataConnSock.Send(buffer, totalBytesSent, requiredBytesSend, SocketFlags.None);
+                                    totalBytesSent += currentBytesSend;
+                                }
 
-                            } while (bytesRead > 0);
+                            } while ((bytesRead > 0) && (currentBytesSend == requiredBytesSend));
 
-                            // Отправляем клиенту код 226 - отправка файла успешно выполнена
-                            SendResponse("226 Transfer complete.");
-
-                            // Закрываем соединение для передачи данных
-                            CloseDataConnection(connectedSockets);
-                        }
-                        catch (SocketException sockExc)
-                        {
-                            // Если буфер сокета клиента переполнен
-                            if (sockExc.SocketErrorCode.Equals(SocketError.WouldBlock))
+                            // Если отправка файла еще не закончилась
+                            if (currentBytesSend < requiredBytesSend)
                             {
-                                // Тогда: необходимо подождать, пока клиент считает ранее отправленные байты
+                                // Тогда:
+                                // => буфер сокета переполнен и необходимо продолжить отправку позже
+                                // => необходимо подождать, пока клиент считает ранее отправленные байты
 
                                 // Сохраняем в поле unhandledCmd необработанную команду, её аргумент (уже упрощённый путь к существующему файлу), а также позицию указателя, с которой необходимо будет продолжить передачу файла
-                                unhandledCmd = (cmd, absPath, fstream.Position - (bytesRead - bytesSend));
+                                unhandledCmd = (cmd, absPath, fstream.Position - (bytesRead - totalBytesSent));
 
-                                // Если это первое исключение при передаче данного файла
+                                // Если переполнение буфера при передаче данного файла случилось первый раз
                                 if (!isContinue)
                                 {
                                     // Тогда:
@@ -603,11 +640,11 @@ namespace ftpserver
                                     // вернуться и продолжить передачу файла
                                     connectedSockets.Add(new ConnectedSocket(cltDataConnSock, this, false, false, false, true));
                                 }
-                            } // Иначе, если сокет клиента по какой-то причине недоступен
-                            else
+                            }
+                            else // Иначе, если отправка файла завершилась
                             {
-                                // Отправляем клиенту код 550 - ошибка отправки файла - в управляющее соединение
-                                SendResponse("550 Failed to transfer file.");
+                                // Отправляем клиенту код 226 - отправка файла успешно выполнена
+                                if (!SendResponse(Cmd.RETR, "226 Transfer complete.", true)) return (unhandledRes == null) ? false : true;
 
                                 // Закрываем соединение для передачи данных
                                 CloseDataConnection(connectedSockets);
@@ -616,9 +653,8 @@ namespace ftpserver
                         catch (Exception exc)
                         {
                             // => Завершаем передачу, так как произошла ошибка
-
                             // Отправляем клиенту код 550 - ошибка отправки файла - в управляющее соединение
-                            SendResponse("550 Failed to transfer file.");
+                            if (!SendResponse(Cmd.RETR, "550 Failed to transfer file.", true)) return (unhandledRes == null) ? false : true;
 
                             // Закрываем соединение для передачи данных
                             CloseDataConnection(connectedSockets);
@@ -652,7 +688,10 @@ namespace ftpserver
 
                     // Если путь указан некорректно
                     if (!isContinue && !tuple.Value.Item1)
-                        SendResponse("553 Could not create file."); // Тогда: отправляем клиенту отклик код 553 с сообщением об ошибке
+                    {
+                        // Тогда: отправляем клиенту отклик код 553 с сообщением об ошибке
+                        if (!SendResponse(Cmd.STOR, "553 Could not create file.") && unhandledRes == null) return false;
+                    }
                     else // Иначе
                     {
                         // Тогда:
@@ -669,16 +708,19 @@ namespace ftpserver
                         // Создаём массив байтов для считывания файла по частям
                         byte[] buffer = new byte[bufferSize];
 
-                        // Если необходимо продолжить получение данного файла
-                        if (isContinue)
-                            fstream.Seek(unhandledCmd.Value.Item3.Value, SeekOrigin.Begin); // Тогда: изменяем позицию указателя в потоке на ту, на которой остановились в предыдущий раз
-                        else // Иначе, отправляем клиенту код 150
-                            SendResponse("150 Ok to send data.");
-
-                        int bytesRecv;
-
                         try
                         {
+
+                            // Если необходимо продолжить получение данного файла
+                            if (isContinue)
+                                fstream.Seek(unhandledCmd.Value.Item3.Value, SeekOrigin.Begin); // Тогда: изменяем позицию указателя в потоке на ту, на которой остановились в предыдущий раз
+                            else // Иначе, отправляем клиенту код 150
+                            {
+                                if (!SendResponse(Cmd.STOR, "150 Ok to send data.", true, arg)) return (unhandledRes == null) ? false : true;
+                            }
+
+                            int bytesRecv;
+
                             while (true)
                             {
                                 // Если метод Poll вернул true
@@ -705,7 +747,7 @@ namespace ftpserver
                                         // => завершаем процесс получения файла
 
                                         // Отправляем клиенту код 226 - получение файла успешно выполнено - в управляющее соединение
-                                        SendResponse("226 Transfer complete.");
+                                        if (!SendResponse(Cmd.STOR, "226 Transfer complete.", true)) return (unhandledRes == null) ? false : true;
 
                                         // Выходим из цикла
                                         break;
@@ -734,7 +776,7 @@ namespace ftpserver
                                     }
 
                                     // Выходим из данного метода
-                                    return;
+                                    return true;
                                 }
                             }
                         }
@@ -742,8 +784,8 @@ namespace ftpserver
                         {
                             // Останавливаем процедуру получения файла на том моменте, на котором остановились
 
-                            // Отправляем клиенту код 226
-                            SendResponse("226 Transfer complete.");
+                            // Отправляем клиенту код 226 - получение файла успешно выполнено - в управляющее соединение
+                            if (!SendResponse(Cmd.STOR, "226 Transfer complete.", true)) return (unhandledRes == null) ? false : true;
                         }
                         finally
                         {
@@ -758,29 +800,57 @@ namespace ftpserver
                     }
                 }
             }
+
+            return true;
         }
 
         // Метод, который отправляет отклик сервера клиенту
-        bool SendResponse(string response)
+        public bool SendResponse(Cmd? cmd, string? response, bool isNeedAddActs = false, string? arg = null)
         {
+            // Массив байт, содержащий отклик сервера
+            byte[] buffer = (unhandledRes == null) ? Encoding.ASCII.GetBytes(response + "\r\n") : unhandledRes.Value.Item2;
+
+            // Общее количество отправленных байт
+            int totalBytesSent = (unhandledRes == null) ? 0 : unhandledRes.Value.Item3;
+
+            // Количество отправленных байт (за одну итерацию цикла)
+            int currentBytesSend = 0;
+
+            // Количество байт, необходимых для отправки
+            int requiredBytesSend = 0;
+
             try
             {
-                // Вспомогательная переменная для количества отправленных байт
-                int bytesSend = 0;
-
-                // Массив байт, содержащий отклик сервера
-                byte[] buffer = Encoding.ASCII.GetBytes(response + "\r\n");
-
                 // Отправляем отклик сервера клиенту
-                while (bytesSend < buffer.Length)
-                    bytesSend += cltCtrlConnSock.Send(buffer, bytesSend, buffer.Length - bytesSend, SocketFlags.None);
+                while ((totalBytesSent < buffer.Length) && (currentBytesSend == requiredBytesSend))
+                {
+                    requiredBytesSend = buffer.Length - totalBytesSent;
+                    currentBytesSend = cltCtrlConnSock.Send(buffer, totalBytesSent, requiredBytesSend, SocketFlags.None);
+                    totalBytesSent += currentBytesSend;
+                }
+
+                // Если отправка отклика еще не закончилась
+                if (totalBytesSent < buffer.Length)
+                {
+                    // Тогда: => буфер сокета переполнен и необходимо продолжить отправку позже
+
+                    // Сохраняем в поле unhandledRes ftp команду (в контексте которой происходит отправка отклика), неотправленный отклик и позицию, на которой остановилась отправка
+                    unhandledRes = (cmd, buffer, totalBytesSent, isNeedAddActs, arg);
+
+                    return false;
+                }
             }
-            catch (Exception exc)
+            catch (SocketException sockExc)
             {
+                unhandledRes = null;
+
+                // => Произошла ошибка
                 return false;
             }
 
-            // Возвращаем true
+            unhandledRes = null;
+
+            // Отправка отклика успешно закончилась
             return true;
         }
 
@@ -823,8 +893,7 @@ namespace ftpserver
                 int timeout = 0; // 0 микросекунд
 
                 // Если метод Poll вернул true и нет доступных команд для чтения
-                if (cltCtrlConnSock.Poll(timeout, SelectMode.SelectRead) && (cltCtrlConnSock.Available == 0))
-                    return false; // Тогда: данный клиент отключился от сервера => возвращаем: false
+                if (cltCtrlConnSock.Poll(timeout, SelectMode.SelectRead) && (cltCtrlConnSock.Available == 0)) return false; // Тогда: данный клиент отключился от сервера => возвращаем: false
 
                 // Производим предварительные действия с командой
 
@@ -848,7 +917,8 @@ namespace ftpserver
                     if (cmd == "USER")
                     {
                         isLogGet = true;
-                        SendResponse("331 Please specify the password.");
+
+                        if (!SendResponse(Cmd.USER, "331 Please specify the password.") && unhandledRes == null) return false;
                     } // Иначе, если клиент запросил команду PASS <password> - ввод пароля
                     else if (cmd == "PASS")
                     {
@@ -861,21 +931,28 @@ namespace ftpserver
                             isAuth = true;
 
                             // Высылаем код 530 с сообщением об успешной авторизации
-                            SuccesAuth();
+                            if (!SendResponse(Cmd.PASS, "230 Login successful.") && unhandledRes == null) return false;
                         }
                         else // Иначе, если клиент ещё не вводил логин, а уже требует ввода пароля
-                            SendResponse("503 Login with USER first."); // Тогда: высылаем клиенту код 503 и требуем его сначала авторизоваться
+                        {
+                            // Тогда: высылаем клиенту код 503 и требуем его сначала авторизоваться
+
+                            if (!SendResponse(Cmd.PASS, "503 Login with USER first.") && unhandledRes == null) return false;
+                        }
                     } // Иначе, если клиент запросил команду QUIT - отключение от сервера
                     else if (cmd == "QUIT")
                     {
                         // Отправляем клиенту код: 221
-                        SendResponse("221 Goodbye.");
+                        SendResponse(Cmd.QUIT, "221 Goodbye.", true);
 
-                        // Возвращаем: false, которое будет означать, что данного клиента необходимо удалить из списка всех клиентов
-                        return false;
+                        if (unhandledRes == null) return false; // Возвращаем: false, которое будет означать, что данного клиента необходимо удалить из списка всех клиентов
                     }
                     else // Иначе, если клиент ещё не авторизовался, а уже требует выполнение команд, не относящихся к авторизации и отключению от сервера
-                        RequireAuth(); // Тогда: высылаем клиенту код 530 и требуем его авторизоваться
+                    {
+                        // Тогда: высылаем клиенту код 530 и требуем его авторизоваться
+
+                        if (!SendResponse(null, "530 Please login with USER and PASS.") && unhandledRes == null) return false;
+                    }
                 } // Иначе, если клиент уже авторизовался
                 else
                 {
@@ -883,13 +960,25 @@ namespace ftpserver
 
                     // Если клиент запросил команду USER <username> - авторизацию
                     if (cmd == "USER")
-                        SendResponse("530 Can't change to another user."); // Тогда: так как клиент уже авторизован под конкретным пользователем, то сообщаем клиенту о том, что сервер не может переключиться на другого пользователя
+                    {
+                        // Тогда: так как клиент уже авторизован под конкретным пользователем, то сообщаем клиенту о том, что сервер не может переключиться на другого пользователя
+                        if (!SendResponse(Cmd.USER, "530 Can't change to another user.") && unhandledRes == null) return false;
+                    }
                     else if (cmd == "PASS") // Иначе, если клиент запросил команду PASS <password> - ввод пароля
-                        SendResponse("230 Already logged in."); // Тогда: сообщаем клиенту о том, что он уже авторизован
+                    {
+                        // Тогда: сообщаем клиенту о том, что он уже авторизован
+                        if (!SendResponse(Cmd.PASS, "230 Already logged in.") && unhandledRes == null) return false;
+                    }
                     else if (cmd == "SYST") // Иначе, если клиент запросил команду SYST - информация о системе, где запущен FTP Server
-                        SendResponse("215 UNIX Type: L8."); // Тогда: отправляем клиенту сведения о системе, на которой запущен FTP сервер
+                    {
+                        // Тогда: отправляем клиенту сведения о системе, на которой запущен FTP сервер
+                        if (!SendResponse(Cmd.SYST, "215 UNIX Type: L8.") && unhandledRes == null) return false;
+                    }
                     else if (cmd == "PWD") // Иначе, если клиент запросил команду PWD - текущая директория
-                        SendResponse("257 \"" + currDir + "\" is the current directory."); // Тогда: отправляем клиенту текущую директорию
+                    {
+                        // Тогда: отправляем клиенту текущую директорию
+                        if (!SendResponse(Cmd.PWD, "257 \"" + currDir + "\" is the current directory.") && unhandledRes == null) return false;
+                    }
                     else if (cmd == "CWD") // Иначе, если клиент запросил команду CWD <SP> <pathname> - изменить текущую директорию на <pathname>
                     {
                         // Тогда:
@@ -905,7 +994,9 @@ namespace ftpserver
 
                         // Если указанная директория <pathname> не существует
                         if (!Directory.Exists(((simplifiedPath == "/") ? workingDirPath : (workingDirPath + simplifiedPath)))) // Тогда: отправляем клиенту код 550 с сообщением об ошибке измении директории
-                            SendResponse("550 Failed to change directory.");
+                        {
+                            if (!SendResponse(Cmd.CWD, "550 Failed to change directory.") && unhandledRes == null) return false;
+                        }
                         else // Иначе, если данная директория существует
                         {
                             // Тогда: изменяем текущую директорию и отправляем клиенту код 250
@@ -914,7 +1005,7 @@ namespace ftpserver
                             currDir = simplifiedPath;
 
                             // Отправляем клиенту отклик код 250 с сообщением об успешной смене директории
-                            SendResponse("250 Directory successfully changed.");
+                            if (!SendResponse(Cmd.CWD, "250 Directory successfully changed.") && unhandledRes == null) return false;
                         }
 
                     } // Иначе, если клиент запросил команду MKD <SP> <pathname> - создать новую директорию
@@ -935,15 +1026,21 @@ namespace ftpserver
                         string absNewDirPath = workingDirPath + newDirPath;
 
                         // Если клиент указал путь к директории, который после упрощения привёл к корневой директории
-                        if (newDirPath == "/") // Тогда: отправляем клиенту отклик код 550 с сообщением об ошибке: невозможно создать данную директорию
-                            SendResponse("550 Create directory operation failed.");
+                        if (newDirPath == "/")
+                        {
+                            // Тогда: отправляем клиенту отклик код 550 с сообщением об ошибке: невозможно создать данную директорию
+                            if (!SendResponse(Cmd.MKD, "550 Create directory operation failed.") && unhandledRes == null) return false;
+                        }
                         else // Иначе
                         {
                             // Тогда:
 
                             // Если указанная директория <pathname> уже существует
-                            if (Directory.Exists(absNewDirPath)) // Тогда: отправляем клиенту отклик код 550 с сообщением об ошибке: невозможно создать данную директорию
-                                SendResponse("550 Create directory operation failed.");
+                            if (Directory.Exists(absNewDirPath))
+                            {
+                                // Тогда: отправляем клиенту отклик код 550 с сообщением об ошибке: невозможно создать данную директорию
+                                if (!SendResponse(Cmd.MKD, "550 Create directory operation failed.") && unhandledRes == null) return false;
+                            }
                             else // Иначе, если такой директории ещё не существует
                             {
                                 // Тогда:
@@ -952,12 +1049,12 @@ namespace ftpserver
                                 try
                                 {
                                     Directory.CreateDirectory(absNewDirPath);
-                                    SendResponse("257 \"" + newDirPath + "\" created.");
+                                    if (!SendResponse(Cmd.MKD, "257 \"" + newDirPath + "\" created.") && unhandledRes == null) return false;
                                 } // Обрабатываем исключение
                                 catch (Exception exc)
                                 {
                                     // Тогда: отправляем клиенту отклик код 550 с сообщением об ошибке: невозможно создать данную директорию
-                                    SendResponse("550 Create directory operation failed.");
+                                    if (!SendResponse(Cmd.MKD, "550 Create directory operation failed.") && unhandledRes == null) return false;
                                 }
                             }
                         }
@@ -976,7 +1073,10 @@ namespace ftpserver
 
                         // Если клиент пытается удалить корневую или домашнюю директории
                         if (pathname == "/" || pathname == "~")
-                            SendResponse("550 Delete operation failed."); // Тогда: отправляем клиенту отклик код 550 с сообщением об ошибке: невозможно удалить данный файл
+                        {
+                            // Тогда: отправляем клиенту отклик код 550 с сообщением об ошибке: невозможно удалить данный файл
+                            if (!SendResponse(Cmd.DELE, "550 Delete operation failed.") && unhandledRes == null) return false;
+                        }
                         else // Иначе
                         {
                             // Тогда: необходимо проверить наличие файла в конце пути pathname
@@ -986,7 +1086,10 @@ namespace ftpserver
 
                             // Если в конце пути содержится '/' вместо имени файла
                             if (splitPathName[splitPathName.Length - 1] == "")
-                                SendResponse("550 Delete operation failed."); // Тогда: отправляем клиенту отклик код 550 с сообщением об ошибке: невозможно удалить данный файл
+                            {
+                                // Тогда: отправляем клиенту отклик код 550 с сообщением об ошибке: невозможно удалить данный файл
+                                if (!SendResponse(Cmd.DELE, "550 Delete operation failed.") && unhandledRes == null) return false;
+                            }
                             else // Иначе
                             {
                                 // Тогда: необходимо упростить путь до файла и попытаться удалить указанный файл
@@ -999,7 +1102,10 @@ namespace ftpserver
 
                                 // Если указанный файл не существует
                                 if (!File.Exists(absFilePath))
-                                    SendResponse("550 Delete operation failed."); // Тогда: отправляем клиенту отклик код 550 с сообщением об ошибке: невозможно удалить данный файл
+                                {
+                                    // Тогда: отправляем клиенту отклик код 550 с сообщением об ошибке: невозможно удалить данный файл
+                                    if (!SendResponse(Cmd.DELE, "550 Delete operation failed.") && unhandledRes == null) return false;
+                                }
                                 else // Иначе
                                 {
                                     // Тогда: пробуем удалить данный файл
@@ -1010,11 +1116,12 @@ namespace ftpserver
                                         File.Delete(absFilePath);
 
                                         // Отправляем клиенту отклик код 250 с сообщением об успешном удалении указанного файла
-                                        SendResponse("250 Delete operation successful.");
+                                        if (!SendResponse(Cmd.DELE, "250 Delete operation successful.") && unhandledRes == null) return false;
                                     } // Обрабатываем исключение
                                     catch (Exception exc)
                                     {
-                                        SendResponse("550 Delete operation failed."); // Тогда: отправляем клиенту отклик код 550 с сообщением об ошибке: невозможно удалить данный файл
+                                        // Тогда: отправляем клиенту отклик код 550 с сообщением об ошибке: невозможно удалить данный файл
+                                        if (!SendResponse(Cmd.DELE, "550 Delete operation failed.") && unhandledRes == null) return false;
                                     }
                                 }
                             }
@@ -1101,7 +1208,7 @@ namespace ftpserver
                         connectedSockets.Add(listener);
 
                         // Отправляем клиенту код 227 с ip адресом и портом, на котором сервер открыл соединение для передачи данных
-                        SendResponse("227 Entering Passive Mode (127,0,0,1," + portArray[1].ToString() + "," + portArray[0].ToString() + ").");
+                        if (!SendResponse(Cmd.PASV, "227 Entering Passive Mode (127,0,0,1," + portArray[1].ToString() + "," + portArray[0].ToString() + ").") && unhandledRes == null) return false;
                     } // Иначе, если клиент запросил команду LIST [<SP> <pathname>] - листинг директории <pathname> или файла
                     else if (cmd == "LIST")
                     {
@@ -1117,11 +1224,13 @@ namespace ftpserver
                             string pathname = (cmdArr.Length > 2) ? tmpCmd.Substring(5) : ((cmdArr.Length > 1) ? cmdArr[1] : null);
 
                             // Обрабатываем данную команду, используя второе соединение
-                            HandleDataConnection(Cmd.LIST, pathname, connectedSockets);
+                            if (!HandleDataConnection(Cmd.LIST, pathname, connectedSockets)) return false;
                         }
                         else // Иначе, если соединение не открыто
-                            RequireOpenDataConnection(); // Тогда: требуем клиента открыть соединение для передачи данных
-
+                        {
+                            // Тогда: требуем клиента открыть соединение для передачи данных
+                            if (!RequireOpenDataConnection(Cmd.LIST) && unhandledRes == null) return false;
+                        }
                     } // Иначе, если клиент запросил команду RETR <SP> <pathname> - скачивание файла с сервера
                     else if (cmd == "RETR")
                     {
@@ -1137,10 +1246,13 @@ namespace ftpserver
                             string pathname = (cmdArr.Length > 2) ? tmpCmd.Substring(5) : ((cmdArr.Length > 1) ? cmdArr[1] : null);
 
                             // Обрабатываем данную команду, используя второе соединение
-                            HandleDataConnection(Cmd.RETR, pathname, connectedSockets);
+                            if (!HandleDataConnection(Cmd.RETR, pathname, connectedSockets)) return false;
                         }
                         else // Иначе, если соединение не открыто
-                            RequireOpenDataConnection(); // Тогда: требуем клиента открыть соединение для передачи данных
+                        {
+                            // Тогда: требуем клиента открыть соединение для передачи данных
+                            if (!RequireOpenDataConnection(Cmd.LIST) && unhandledRes == null) return false;
+                        }
 
                     } // Иначе, если клиент запросил команду STOR <SP> <pathname> - загрузка файла на сервер
                     else if (cmd == "STOR")
@@ -1157,10 +1269,13 @@ namespace ftpserver
                             string pathname = (cmdArr.Length > 2) ? tmpCmd.Substring(5) : ((cmdArr.Length > 1) ? cmdArr[1] : null);
 
                             // Обрабатываем данную команду, используя второе соединение
-                            HandleDataConnection(Cmd.STOR, pathname, connectedSockets);
+                            if (!HandleDataConnection(Cmd.STOR, pathname, connectedSockets)) return false;
                         }
                         else // Иначе, если соединение не открыто
-                            RequireOpenDataConnection(); // Тогда: требуем клиента открыть соединение для передачи данных
+                        {
+                            // Тогда: требуем клиента открыть соединение для передачи данных
+                            if (!RequireOpenDataConnection(Cmd.LIST) && unhandledRes == null) return false;
+                        }
 
                     }// Иначе, если клиент запросил команду TYPE <SP> <type-code> - тип передачи данных
                     else if (cmd == "TYPE")
@@ -1168,7 +1283,7 @@ namespace ftpserver
                         // Тогда:
 
                         // Сервер работает только с бинарным (двоиным) режимом передачи данных
-                        SendResponse("200 Switching to Binary mode.");
+                        if (!SendResponse(Cmd.TYPE, "200 Switching to Binary mode.") && unhandledRes == null) return false;
 
                     }
                     else if (cmd == "QUIT") // Иначе, если клиент запросил команду QUIT - отключение от сервера
@@ -1176,14 +1291,14 @@ namespace ftpserver
                         // Тогда:
 
                         // Отправляем клиенту код: 221
-                        SendResponse("221 Goodbye.");
+                        SendResponse(Cmd.QUIT, "221 Goodbye.", true);
 
-                        // Возвращаем: false, которое будет означать, что данного клиента необходимо удалить из списка всех клиентов
-                        return false;
+                        if (unhandledRes == null)
+                            return false; // Возвращаем: false, которое будет означать, что данного клиента необходимо удалить из списка всех клиентов
                     }
                     else // Иначе, если команда оказалась неизвестной/не реализованной
                     {
-                        SendResponse("502 Command not implemented.");
+                        if (!SendResponse(null, "502 Command not implemented.") && unhandledRes == null) return false;
                     }
                 }
             }
